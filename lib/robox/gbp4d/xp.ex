@@ -462,7 +462,7 @@ defmodule Robox.Gbp4d.Xp do
     ik =
       ik ++
         [
-          it[1] + it[5] <= kt[1] && it[2] <= kt[2] + kt[7] && kt[2] + kt[6] < it[2] + it[7] &&
+          it[1] + it[5] <= kt[1] && it[2] <= kt[2] + kt[6] && kt[2] + kt[6] < it[2] + it[6] &&
             it[3] <= kt[3] && kt[3] < it[3] + it[7]
         ]
 

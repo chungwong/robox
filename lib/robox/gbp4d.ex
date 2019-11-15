@@ -125,7 +125,7 @@ defmodule Robox.Gbp4d do
 
       ok = Matrix.all?(gastr, 1)
 
-      # # # it via itastr and gastr: flag no fit with (x, y) = (-1, -1, -1) instead of (0, 0, 0)
+      # it via itastr and gastr: flag no fit with (x, y) = (-1, -1, -1) instead of (0, 0, 0)
       it = Matrix.fill(it, xyzw_ulmt, -1)
 
       vals = Matrix.get_columns(itastr, glmt)
@@ -142,7 +142,21 @@ defmodule Robox.Gbp4d do
     end
   end
 
-  # @spec gbp4d_solver_dpp_main(%Matrex{}, %Matrex{}, %Matrex{}, %Matrex{}, %Matrex{}, number, number, %Matrex{}, %Matrex{}, %Matrex{}, number, number, number) :: {boolean, %Matrex{}}
+  @spec gbp4d_solver_dpp_main(
+          %Matrex{},
+          %Matrex{},
+          %Matrex{},
+          %Matrex{},
+          %Matrex{},
+          number,
+          number,
+          %Matrex{},
+          %Matrex{},
+          %Matrex{},
+          number,
+          number,
+          number
+        ) :: {boolean, %Matrex{}, %Matrex{}, %Matrex{}, %Matrex{}, number}
   def gbp4d_solver_dpp_main(
         bn,
         it,
@@ -156,16 +170,18 @@ defmodule Robox.Gbp4d do
         v,
         vastr,
         u,
-        uastr,
-        flag \\ false
+        uastr
       ) do
     # index of it to fit
     id = trunc(q[q[:rows] - nlvl + 1]) + 1
 
     glmt =
-      Matrex.zeros(g[:rows], 1)
-      |> Matrix.get_rows(Matrix.find(g, 0))
-      |> Matrex.add(1)
+      Matrix.find(g, 0)
+      |> Matrex.to_list()
+      |> Enum.reduce(Matrex.zeros(g[:rows], 1), fn i, glmt ->
+        i = trunc(i)
+        Matrex.set(glmt, i, 1, glmt[i] + 1)
+      end)
 
     ok = false
 
@@ -246,8 +262,7 @@ defmodule Robox.Gbp4d do
                     v,
                     vastr,
                     u,
-                    uastr,
-                    true
+                    uastr
                   )
 
                 if ok do
