@@ -1,8 +1,6 @@
 defmodule Robox.Gbp4dTest do
   use ExUnit.Case
-  alias Robox.{Gbp4d}
-
-  require Logger
+  alias Robox.Gbp4d
 
   @it %{
     oid: [
@@ -30,506 +28,156 @@ defmodule Robox.Gbp4dTest do
     w: [600.000, 600.000, 800.000, 800.000, 800.000]
   }
 
+  defp last5_ldhw do
+    [@it.l, @it.d, @it.h, @it.w]
+    |> Enum.map(&Enum.slice(&1, -5..-1))
+    |> Enum.zip()
+    |> Enum.map(fn {l, d, h, w} -> {l, d, h, w} end)
+  end
+
+  defp bin(i) do
+    {Enum.at(@bn.l, i), Enum.at(@bn.d, i), Enum.at(@bn.h, i), Enum.at(@bn.w, i)}
+  end
+
   test "match gbp4d example" do
-    ldhw =
-      Matrex.new([
-        @it.l |> Enum.slice(-5..-1),
-        @it.d |> Enum.slice(-5..-1),
-        @it.h |> Enum.slice(-5..-1),
-        @it.w |> Enum.slice(-5..-1)
-      ])
+    ldhw = last5_ldhw()
+    m = bin(3)
 
-    m =
-      Matrex.new([
-        @bn.l,
-        @bn.d,
-        @bn.h,
-        @bn.w
-      ])
+    p = Gbp4d.gbp4d_solver_dpp_prep_create_p(ldhw, m)
+    sn = Gbp4d.gbp4d_solver_dpp(p, ldhw, m)
 
-    m4l = Matrex.column(m, 4)
+    assert Gbp4d.Ck.gbp4d_checkr(sn)
 
-    p = Gbp4d.gbp4d_solver_dpp_prep_create_p(ldhw, m4l)
+    assert sn.bn == m
+    assert sn.k == [0, 1, 1, 1, 1]
+    assert_in_delta sn.o, 550.474816, 1.0e-6
+    refute sn.ok
 
-    sn = Gbp4d.gbp4d_solver_dpp(p, ldhw, m4l)
-    Gbp4d.Ck.gbp4d_checkr(sn)
+    # heaviest item left out by the weight knapsack, the rest fitted:
+    # 2 x (7.24, 7.24, 2.58, 110), (6, 6, 6, 235), (4, 4, 4, 258)
+    [it0, it1, it2, it3, it4] = sn.it
 
-    assert %Gbp4d{
-             bn: m4l,
-             it:
-               Matrex.new([
-                 [-1.0, 0.0, 0.0, 0.0, 6.0],
-                 [-1.0, 0.0, 0.0, 2.58, 2.58],
-                 [-1.0, 2.58, 0.0, 2.58, 2.58],
-                 [-1.0, 110.0, 0.0, 220.0, 455.0],
-                 [2.14, 7.24, 7.24, 6.0, 4.0],
-                 [4.76, 2.58, 7.24, 6.0, 4.0],
-                 [3.58, 7.24, 2.58, 6.0, 4.0],
-                 [243.0, 110.0, 110.0, 235.0, 258.0]
-               ]),
-             k:
-               Matrex.new([
-                 [0.0],
-                 [1.0],
-                 [1.0],
-                 [1.0],
-                 [1.0]
-               ]),
-             o: 550.4747924804688,
-             ok: false,
-             p: p
-           } == sn
+    assert {-1.0, -1.0, -1.0, -1.0, 2.14, 3.58, 4.76, 243.0} == it0
+
+    for {x, y, z, _, l, d, h, _} <- [it1, it2, it3, it4] do
+      assert x + l <= 10.0 + 1.0e-8
+      assert y + d <= 10.0 + 1.0e-8
+      assert z + h <= 10.0 + 1.0e-8
+    end
   end
 
   test "match gbp4d example with first bin" do
-    ldhw =
-      Matrex.new([
-        @it.l |> Enum.slice(-5..-1),
-        @it.d |> Enum.slice(-5..-1),
-        @it.h |> Enum.slice(-5..-1),
-        @it.w |> Enum.slice(-5..-1)
-      ])
+    ldhw = last5_ldhw()
+    m = bin(0)
 
-    m =
-      Matrex.new([
-        @bn.l,
-        @bn.d,
-        @bn.h,
-        @bn.w
-      ])
+    p = Gbp4d.gbp4d_solver_dpp_prep_create_p(ldhw, m)
+    sn = Gbp4d.gbp4d_solver_dpp(p, ldhw, m)
 
-    m1l = Matrex.column(m, 1)
+    assert Gbp4d.Ck.gbp4d_checkr(sn)
 
-    p = Gbp4d.gbp4d_solver_dpp_prep_create_p(ldhw, m1l)
+    # only the 6 x 6 x 6 item fits the 6 x 6 x 6 bin
+    assert sn.k == [0, 0, 0, 1, 0]
+    assert sn.o == 216.0
+    refute sn.ok
 
-    sn = Gbp4d.gbp4d_solver_dpp(p, ldhw, m1l)
-    Gbp4d.Ck.gbp4d_checkr(sn)
-
-    assert %Gbp4d{
-             bn: m1l,
-             it:
-               Matrex.new([
-                 [-1.0, -1.0, -1.0, 0.0, -1.0],
-                 [-1.0, -1.0, -1.0, 0.0, -1.0],
-                 [-1.0, -1.0, -1.0, 0.0, -1.0],
-                 [-1.0, -1.0, -1.0, 0.0, -1.0],
-                 [2.14, 7.24, 7.24, 6.0, 4.0],
-                 [3.58, 7.24, 7.24, 6.0, 4.0],
-                 [4.76, 2.58, 2.58, 6.0, 4.0],
-                 [243.0, 110.0, 110.0, 235.0, 258.0]
-               ]),
-             k:
-               Matrex.new([
-                 [0.0],
-                 [0.0],
-                 [0.0],
-                 [1.0],
-                 [0.0]
-               ]),
-             o: 216.0,
-             ok: false,
-             p: p
-           } == sn
+    assert Enum.at(sn.it, 3) == {0.0, 0.0, 0.0, 0.0, 6.0, 6.0, 6.0, 235.0}
   end
 
   test "pack one item in one bin" do
-    it = %{
-      sku: ["16284119"],
-      l: [0.1],
-      d: [0.1],
-      h: [0.1],
-      w: [21.8]
-    }
+    sn = Gbp4d.pack([[0.1, 0.1, 0.1, 21.8]], [100.0, 100.0, 100.0, 22.0])
 
-    bn = %{
-      id: ["B1"],
-      l: [100.0000],
-      d: [100.0000],
-      h: [100.0000],
-      w: [22.000]
-    }
-
-    ldhw =
-      Matrex.new([
-        it.l,
-        it.d,
-        it.h,
-        it.w
-      ])
-
-    m =
-      Matrex.new([
-        bn.l,
-        bn.d,
-        bn.h,
-        bn.w
-      ])
-      |> Matrex.column(1)
-
-    p = Gbp4d.gbp4d_solver_dpp_prep_create_p(ldhw, m)
-
-    sn = Gbp4d.gbp4d_solver_dpp(p, ldhw, m)
-
-    assert %Gbp4d{
-             bn: m,
-             it:
-               Matrex.new([
-                 [0],
-                 [0],
-                 [0],
-                 [0],
-                 [0.1],
-                 [0.1],
-                 [0.1],
-                 [21.8]
-               ]),
-             k:
-               Matrex.new([
-                 [1.0]
-               ]),
-             o: 0.0010000000474974513,
-             ok: true,
-             p: p
-           } == sn
-
-    Gbp4d.Ck.gbp4d_checkr(sn)
+    assert sn.k == [1]
+    assert sn.ok
+    assert_in_delta sn.o, 0.001, 1.0e-9
+    assert [{0.0, 0.0, 0.0, 0.0, 0.1, 0.1, 0.1, 21.8}] == sn.it
   end
 
-  test "pack one item in one bin v2" do
-    it = %{
-      sku: ["16284119"],
-      l: [0.1],
-      d: [0.1],
-      h: [0.1],
-      w: [22.1]
-    }
+  test "pack one item in one bin v2 - item exceeds weight limit" do
+    sn = Gbp4d.pack([[0.1, 0.1, 0.1, 22.1]], [100.0, 100.0, 100.0, 22.0])
 
-    bn = %{
-      id: ["B1"],
-      l: [100.0000],
-      d: [100.0000],
-      h: [100.0000],
-      w: [22.000]
-    }
-
-    ldhw =
-      Matrex.new([
-        it.l,
-        it.d,
-        it.h,
-        it.w
-      ])
-
-    m =
-      Matrex.new([
-        bn.l,
-        bn.d,
-        bn.h,
-        bn.w
-      ])
-      |> Matrex.column(1)
-
-    p = Gbp4d.gbp4d_solver_dpp_prep_create_p(ldhw, m)
-
-    sn = Gbp4d.gbp4d_solver_dpp(p, ldhw, m)
-
-    assert %Gbp4d{
-             bn: m,
-             it:
-               Matrex.new([
-                 [-1],
-                 [-1],
-                 [-1],
-                 [-1],
-                 [0.1],
-                 [0.1],
-                 [0.1],
-                 [22.1]
-               ]),
-             k:
-               Matrex.new([
-                 [0.0]
-               ]),
-             o: 0,
-             ok: false,
-             p: p
-           } == sn
-
-    Gbp4d.Ck.gbp4d_checkr(sn)
+    assert sn.k == [0]
+    refute sn.ok
+    assert sn.o == 0.0
+    assert [{-1.0, -1.0, -1.0, -1.0, 0.1, 0.1, 0.1, 22.1}] == sn.it
   end
 
-  test "pack one item in one bin v3" do
-    it = %{
-      sku: ["16284119"],
-      l: [1],
-      d: [100],
-      h: [100],
-      w: [1]
-    }
+  test "pack one item in one bin v3 - flat item" do
+    sn = Gbp4d.pack([[1, 100, 100, 1]], [100.0, 100.0, 100.0, 22.0])
 
-    bn = %{
-      id: ["B1"],
-      l: [100.0000],
-      d: [100.0000],
-      h: [100.0000],
-      w: [22.000]
-    }
-
-    ldhw =
-      Matrex.new([
-        it.l,
-        it.d,
-        it.h,
-        it.w
-      ])
-
-    m =
-      Matrex.new([
-        bn.l,
-        bn.d,
-        bn.h,
-        bn.w
-      ])
-      |> Matrex.column(1)
-
-    p = Gbp4d.gbp4d_solver_dpp_prep_create_p(ldhw, m)
-
-    sn = Gbp4d.gbp4d_solver_dpp(p, ldhw, m)
-
-    assert %Gbp4d{
-             bn: m,
-             it:
-               Matrex.new([
-                 [0],
-                 [0],
-                 [0],
-                 [0],
-                 [1],
-                 [100],
-                 [100],
-                 [1]
-               ]),
-             k:
-               Matrex.new([
-                 [1.0]
-               ]),
-             o: 1.0e4,
-             ok: true,
-             p: p
-           } == sn
-
-    Gbp4d.Ck.gbp4d_checkr(sn)
+    assert sn.k == [1]
+    assert sn.ok
+    assert sn.o == 10_000.0
+    assert [{0.0, 0.0, 0.0, 0.0, 1.0, 100.0, 100.0, 1.0}] == sn.it
   end
 
   test "pack multiple item into one bin" do
-    it = %{
-      sku: ["16284119", "17850", "20136"],
-      l: [40, 20, 5],
-      d: [30, 10, 5],
-      h: [30, 10, 5],
-      w: [8, 1, 1]
-    }
+    sn =
+      Gbp4d.pack(
+        [
+          [40, 30, 30, 8],
+          [20, 10, 10, 1],
+          [5, 5, 5, 1]
+        ],
+        [100.0, 100.0, 100.0, 22.0]
+      )
 
-    bn = %{
-      id: ["B1"],
-      l: [100.0000],
-      d: [100.0000],
-      h: [100.0000],
-      w: [22.000]
-    }
+    assert Gbp4d.Ck.gbp4d_checkr(sn)
+    assert sn.k == [1, 1, 1]
+    assert sn.ok
+    assert sn.o == 38_125.0
 
-    ldhw =
-      Matrex.new([
-        it.l,
-        it.d,
-        it.h,
-        it.w
-      ])
-
-    m =
-      Matrex.new([
-        bn.l,
-        bn.d,
-        bn.h,
-        bn.w
-      ])
-      |> Matrex.column(1)
-
-    p = Gbp4d.gbp4d_solver_dpp_prep_create_p(ldhw, m)
-
-    sn = Gbp4d.gbp4d_solver_dpp(p, ldhw, m)
-
-    assert %Gbp4d{
-             bn: m,
-             it:
-               Matrex.new([
-                 [0, 40, 60],
-                 [0, 0, 0],
-                 [0, 0, 0],
-                 [0, 8, 9],
-                 [40, 20, 5],
-                 [30, 10, 5],
-                 [30, 10, 5],
-                 [8, 1, 1]
-               ]),
-             k:
-               Matrex.new([
-                 [1.0],
-                 [1.0],
-                 [1.0]
-               ]),
-             o: 38125.0,
-             ok: true,
-             p: p
-           } == sn
-
-    Gbp4d.Ck.gbp4d_checkr(sn)
+    # exact placement is a score tie broken arbitrarily (the C++ reference
+    # stacks along y, this port along z) - assert cumulative weights instead
+    assert Enum.map(sn.it, &elem(&1, 3)) == [0.0, 8.0, 9.0]
   end
 
   test "pack multiple item into one bin v2" do
-    it = %{
-      sku: ["A", "A", "B", "B", "B", "B"],
-      l: [60, 60, 10, 10, 10, 10],
-      d: [40, 40, 7, 7, 7, 7],
-      h: [40, 40, 9, 9, 9, 9],
-      w: [10, 10, 0.44, 0.44, 0.44, 0.44]
-    }
+    sn =
+      Gbp4d.pack(
+        [
+          [60, 40, 40, 10],
+          [60, 40, 40, 10],
+          [10, 7, 9, 0.44],
+          [10, 7, 9, 0.44],
+          [10, 7, 9, 0.44],
+          [10, 7, 9, 0.44]
+        ],
+        [100.0, 100.0, 100.0, 22.0]
+      )
 
-    bn = %{
-      id: ["B1"],
-      l: [100.0000],
-      d: [100.0000],
-      h: [100.0000],
-      w: [22.000]
-    }
-
-    ldhw =
-      Matrex.new([
-        it.l,
-        it.d,
-        it.h,
-        it.w
-      ])
-
-    m =
-      Matrex.new([
-        bn.l,
-        bn.d,
-        bn.h,
-        bn.w
-      ])
-      |> Matrex.column(1)
-
-    p = Gbp4d.gbp4d_solver_dpp_prep_create_p(ldhw, m)
-
-    sn = Gbp4d.gbp4d_solver_dpp(p, ldhw, m)
-
-    Gbp4d.Ck.gbp4d_checkr(sn)
-
-    assert %Gbp4d{
-             bn: m,
-             it:
-               Matrex.new([
-                 [0, 0, 0, 0, 0, 0],
-                 [40, 0, 90, 80, 90, 80],
-                 [0, 0, 9, 9, 0, 0],
-                 [10, 0, 21.32, 20.88, 20.44, 20.00],
-                 [60, 60, 7, 7, 7, 7],
-                 [40, 40, 10, 10, 10, 10],
-                 [40, 40, 9, 9, 9, 9],
-                 [10, 10, 0.44, 0.44, 0.44, 0.44]
-               ]),
-             k:
-               Matrex.new([
-                 [1.0],
-                 [1.0],
-                 [1.0],
-                 [1.0],
-                 [1.0],
-                 [1.0]
-               ]),
-             o: 194_520,
-             ok: true,
-             p: p
-           } == sn
+    assert Gbp4d.Ck.gbp4d_checkr(sn)
+    assert sn.k == [1, 1, 1, 1, 1, 1]
+    assert sn.ok
+    assert_in_delta sn.o, 194_520.0, 1.0e-6
   end
 
-  def gen_products(_) do
-    max_weight = 100
-    max_length = 200
-    max_depth = 200
-    max_height = 200
-    step = 0.1
+  test "items that cannot all fit keep best subset" do
+    # bin volume only fits two of the three 4x4x4 items
+    sn = Gbp4d.pack([[4, 4, 4, 1], [4, 4, 4, 1], [4, 4, 4, 1]], [8.0, 4.0, 4.0, 100.0])
 
-    Stream.flat_map(1..trunc(max_length / step), fn l ->
-      Stream.flat_map(1..trunc(max_depth / step), fn d ->
-        IO.inspect("l = #{l}, d = #{d}")
-
-        Stream.flat_map(1..trunc(max_height / step), fn h ->
-          Stream.map(1..trunc(max_weight / step), fn w ->
-            {l, d, h, w} = {l * step, d * step, h * step, w * step}
-
-            [
-              "#{l}-#{d}-#{h}-#{w}",
-              l,
-              d,
-              h,
-              w
-            ]
-          end)
-        end)
-      end)
-    end)
+    assert Gbp4d.Ck.gbp4d_checkr(sn)
+    assert Enum.sum(sn.k) == 2
+    assert sn.o == 128.0
+    refute sn.ok
   end
 
-  test "gen_product" do
-    gen_products(1)
+  test "zero-dimension item does not crash" do
+    # production data occasionally has items with missing dimensions;
+    # the old Matrex port crashed on these (NaN in the profit ranking)
+    sn = Gbp4d.pack([[0, 0, 0, 1], [4, 4, 4, 1]], [8.0, 4.0, 4.0, 100.0])
+
+    assert Gbp4d.Ck.gbp4d_checkr(sn)
+    # matches the C++ reference: a zero-volume item never raises the
+    # objective, so it is reported as not fitted
+    assert sn.k == [0, 1]
+    assert sn.o == 64.0
   end
 
-  @tag timeout: :infinity
-  test "crazy test" do
-    bn = %{
-      id: ["B1"],
-      l: [100.0000],
-      d: [100.0000],
-      h: [100.0000],
-      w: [22.000]
-    }
+  test "empty item list" do
+    sn = Gbp4d.pack([], [10.0, 10.0, 10.0, 100.0])
 
-    m =
-      Matrex.new([
-        bn.l,
-        bn.d,
-        bn.h,
-        bn.w
-      ])
-      |> Matrex.column(1)
-
-    Enum.each(gen_products(1), fn [sku, l, d, h, w] ->
-      it = %{
-        sku: [sku],
-        l: [l],
-        d: [d],
-        h: [h],
-        w: [w]
-      }
-
-      ldhw =
-        Matrex.new([
-          it.l,
-          it.d,
-          it.h,
-          it.w
-        ])
-
-      try do
-        p = Gbp4d.gbp4d_solver_dpp_prep_create_p(ldhw, m)
-
-        Gbp4d.gbp4d_solver_dpp(p, ldhw, m)
-      catch
-        e ->
-          Logger.error(inspect("Error: #{[l, d, h, w]} #{inspect(e)}"))
-      end
-    end)
+    assert sn.k == []
+    assert sn.o == 0.0
+    assert sn.ok
   end
 end

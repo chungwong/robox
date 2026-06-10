@@ -1,6 +1,36 @@
 defmodule Robox.Gbp4d do
-  alias Robox.{Gbp1d, Gbp4d, GbpU, Matrix}
+  @moduledoc """
+  Generalized bin packing problem in 4 dimensions, a.k.a bin packing problem
+  with weight limit, mirroring gbp/src/gbp4d.cpp.
+
+  Solves
+
+      maximize   sum_{j=1}^{n} p_j k_j
+
+      subject to sum_{j=1}^{n} w_j k_j <= mw and
+                 fit (l_j, d_j, h_j) at coordinate (x_j, y_j, z_j)
+                 such that no overlap in ml x md x mh cuboid
+
+  via extreme point heuristic and best information score fit strategy.
+
+  Result struct:
+
+    * `p`  - profit vector used as fit sequence ranking, list of floats
+    * `it` - one entry per item, 8-tuple `{x, y, z, w, l, d, h, wt}` where
+      `x, y, z` is the fitted position (`-1.0` when not fitted) and `w` the
+      cumulative weight in the bin when the item was placed
+    * `bn` - bin as `{l, d, h, w}` tuple
+    * `k`  - selection indicator per item, 0 | 1
+    * `o`  - objective: total volume of fitted items
+    * `ok` - did all items fit?
+  """
+
+  alias Robox.Gbp1d
+  alias Robox.Gbp4d.It
+
   defstruct [:p, :it, :bn, :k, :o, :ok]
+
+  @type t :: %__MODULE__{}
 
   # gbp4d global setup on parameter
   # when <  2 items search over all in ktlist w.r.t orientation + extreme point
@@ -11,468 +41,276 @@ defmodule Robox.Gbp4d do
   @gbp4d_nlvl_mkt2 5
   # when <  8 items search best   2 in ktlist w.r.t orientation + extreme point
   @gbp4d_nlvl_mkt3 8
-  # @gbp4d_nlvl_mkt4 = ; # when >= 8 items search best   1 in ktlist w.r.t orientation + extreme point
+  # when >= 8 items search best   1 in ktlist w.r.t orientation + extreme point
 
-  @spec pack(%Matrex{}, %Matrex{}) :: %Gbp4d{}
-  def pack(%Matrex{} = ldhw, %Matrex{} = bn) do
-    if bn[:cols] == 1 do
-      p = Gbp4d.gbp4d_solver_dpp_prep_create_p(ldhw, bn)
-      gbp4d_solver_dpp(p, ldhw, bn)
-    end
-  end
+  @doc """
+  Pack items `ldhw` (list of `[l, d, h, w]` per item) into the single bin
+  `bn` (`[l, d, h, w]` or `[[l, d, h, w]]`).
+  """
+  @spec pack([[number]], [[number]] | [number]) :: t
+  def pack(ldhw, [bn]) when is_list(bn), do: pack(ldhw, bn)
 
-  @spec pack(list, list) :: %Gbp4d{}
-  def pack(ldhw, bn) do
-    ldhw =
-      Matrex.new(ldhw)
-      |> Matrex.transpose()
+  def pack(ldhw, [l, d, h, w]) do
+    ldhw = Enum.map(ldhw, fn [il, id, ih, iw] -> {il / 1, id / 1, ih / 1, iw / 1} end)
+    m = {l / 1, d / 1, h / 1, w / 1}
 
-    bn =
-      Matrex.new(bn)
-      |> Matrex.transpose()
-
-    pack(ldhw, bn)
+    p = gbp4d_solver_dpp_prep_create_p(ldhw, m)
+    gbp4d_solver_dpp(p, ldhw, m)
   end
 
   @doc """
-  solve gbp4d via extreme point heuristic and best information score fit strategy
+  Solve gbp4d via extreme point heuristic and best information score fit
+  strategy. `p` is the profit list, `ldhw` a list of `{l, d, h, w}` tuples,
+  `m` the bin as `{l, d, h, w}`.
   """
-  @spec gbp4d_solver_dpp(%Matrex{}, %Matrex{}, %Matrex{}) :: %Gbp4d{}
-  def gbp4d_solver_dpp(p, ldhw, m) do
-    # n: number of it
-    {n, _} = p[:size]
+  @spec gbp4d_solver_dpp([float], [tuple], tuple) :: t
+  def gbp4d_solver_dpp(p, ldhw, {ml, md, mh, mw}) do
+    n = length(p)
+    bn = {ml / 1, md / 1, mh / 1, mw / 1}
 
-    # q: it fit sequence
-    q = Matrix.sort_index(p, :desc)
+    # it: id => {x, y, z, w, l, d, h, wt}, position initialised at origin
+    it =
+      ldhw
+      |> Enum.with_index()
+      |> Map.new(fn {{l, d, h, w}, i} -> {i, {0.0, 0.0, 0.0, 0.0, l / 1, d / 1, h / 1, w / 1}} end)
 
-    bn = m
-    it = Matrex.zeros(8, n)
-
-    # it - x, y, z, w on row 0, 1, 2, 3
-    # one-based index
-    xyzw_ulmt = Matrix.linspace(1, 4, 4)
-    ld_ulmt = Matrix.linspace(5, 8, 4)
-
-    it = Matrix.set_rows(it, ld_ulmt, ldhw)
-
-    # itastr: it asterisk: global track current best it over recursive call
-    itastr = it
-
-    xp =
-      Matrex.zeros(8, 1)
-      |> Matrex.set(5, 1, bn[1])
-      |> Matrex.set(6, 1, bn[2])
-      |> Matrex.set(7, 1, bn[3])
-      |> Matrex.set(8, 1, bn[4])
-
-    # nlvl: number of it open to fit
-    nlvl = n
-
-    # # nastr: number of it oversize volume or weight limit
-    nastr = gbp4d_solver_dpp_main_create_nastr(p, ldhw, m)
-
-    g = Matrex.zeros(n, 1)
-
-    # # gastr: g asterisk: global track current best g over recursive call
-    gastr = g
-
-    # # v: volume of it - l d h in objective and constraint while w in constraint only
-    v =
-      Matrex.multiply(Matrex.row(it, 5), Matrex.row(it, 6))
-      |> Matrex.multiply(Matrex.row(it, 7))
-      |> Matrex.transpose()
-
-    # # vastr: v asterisk: maximum volume can be achieved via fit
-    vastr = min(Matrix.sum(v), bn[1] * bn[2] * bn[3])
-
-    # # u: sum of v volume fitted into bn
-    u = 0
-
-    # # uastr: u asterisk: global track current best u over recursive call
-    uastr = u
-
-    # # k: selection indicator <vector>
-    k = Matrex.zeros(n, 1)
-
-    # # o: objective achievement <double>
-    o = 0
-
-    # main fit corner case when n == 0
-    if n == 0 || m == nil || m[:size] == {0, 0} do
-      %Gbp4d{
-        p: p,
-        it: it,
-        bn: bn,
-        k: k,
-        o: o,
-        ok: true
-      }
+    if n == 0 do
+      %__MODULE__{p: p, it: [], bn: bn, k: [], o: 0.0, ok: true}
     else
-      # main fit recursive call - should create a class gbp4d_allinfo hold all info?
-      {_ok, it, itastr, _xp, gastr, _uastr} =
-        gbp4d_solver_dpp_main(bn, it, itastr, xp, q, nlvl, nastr, g, gastr, v, vastr, u, uastr)
+      # q: it fit sequence - descending profit
+      q =
+        0..(n - 1)
+        |> Enum.sort_by(fn i -> -Enum.at(p, i) end)
+        |> List.to_tuple()
 
-      # ok via gbp4d_solver_dpp(): can all it fit into bn?
-      # ok via gbp4d_solver_dpp_main() hold a different meaning for recursive purpose
-      # ok via gbp4d_solver_dpp_main(): can all it fit into bn or a subset of it make full use of bn 100% volume utilization?
+      xp = [{0.0, 0.0, 0.0, 0.0, ml / 1, md / 1, mh / 1, mw / 1}]
 
-      glmt = Matrix.find(gastr, 1)
-      k = Matrix.fill(k, glmt, 1)
+      # nastr: number of it certain to be left over by volume or weight limit
+      nastr = gbp4d_solver_dpp_main_create_nastr(p, ldhw, bn)
+
+      # g: status per id: 0 open, 1 fitted, 2 determined no fit
+      g = Map.new(0..(n - 1), &{&1, 0})
+
+      # v: volume per id - l, d, h in objective and constraint, w in constraint only
+      v = Map.new(it, fn {i, {_, _, _, _, l, d, h, _}} -> {i, l * d * h} end)
+
+      # vastr: maximum volume achievable via fit
+      vastr = min(Enum.sum(Map.values(v)), ml * md * mh)
+
+      ctx = %{bn: bn, q: q, n: n, nastr: nastr, v: v, vastr: vastr}
+
+      # global best over the recursive search
+      best = %{itastr: it, gastr: g, uastr: 0.0}
+
+      {_ok, best} = gbp4d_solver_dpp_main(ctx, it, xp, n, g, 0.0, best)
+
+      k = Enum.map(0..(n - 1), fn i -> if best.gastr[i] == 1, do: 1, else: 0 end)
 
       o =
-        Matrix.get_rows(v, glmt)
-        |> Matrix.sum()
+        Enum.reduce(0..(n - 1), 0.0, fn i, acc ->
+          if best.gastr[i] == 1, do: acc + v[i], else: acc
+        end)
 
-      ok = Matrix.all?(gastr, 1)
+      ok = Enum.all?(k, &(&1 == 1))
 
-      # it via itastr and gastr: flag no fit with (x, y) = (-1, -1, -1) instead of (0, 0, 0)
-      it = Matrix.fill(it, xyzw_ulmt, -1)
+      # flag no fit with (x, y, z, w) = (-1, -1, -1, -1) instead of (0, 0, 0, 0)
+      it_out =
+        Enum.map(0..(n - 1), fn i ->
+          if best.gastr[i] == 1 do
+            best.itastr[i]
+          else
+            {_, _, _, _, l, d, h, w} = it[i]
+            {-1.0, -1.0, -1.0, -1.0, l, d, h, w}
+          end
+        end)
 
-      vals = Matrix.get_columns(itastr, glmt)
-      it = Matrix.set_columns(it, glmt, vals)
-
-      %Gbp4d{
-        p: p,
-        it: it,
-        bn: bn,
-        k: k,
-        o: o,
-        ok: ok
-      }
+      %__MODULE__{p: p, it: it_out, bn: bn, k: k, o: o, ok: ok}
     end
   end
 
-  @spec gbp4d_solver_dpp_main(
-          %Matrex{},
-          %Matrex{},
-          %Matrex{},
-          %Matrex{},
-          %Matrex{},
-          number,
-          number,
-          %Matrex{},
-          %Matrex{},
-          %Matrex{},
-          number,
-          number,
-          number
-        ) :: {boolean, %Matrex{}, %Matrex{}, %Matrex{}, %Matrex{}, number}
-  def gbp4d_solver_dpp_main(
-        bn,
-        it,
-        itastr,
-        xp,
-        q,
-        nlvl,
-        nastr,
-        g,
-        gastr,
-        v,
-        vastr,
-        u,
-        uastr
-      ) do
-    # index of it to fit
-    id = trunc(q[q[:rows] - nlvl + 1]) + 1
+  @doc """
+  Recursive main solver. Returns `{ok, best}` where `ok` means all items fit
+  into the bin or a subset of items makes full use of the bin volume, and
+  `best` tracks the global best `itastr` / `gastr` / `uastr`.
+  """
+  def gbp4d_solver_dpp_main(ctx, it, xp, nlvl, g, u, best) do
+    # id: index of it to fit at this level
+    id = elem(ctx.q, ctx.n - nlvl)
 
-    glmt =
-      Matrix.find(g, 0)
-      |> Matrex.to_list()
-      |> Enum.reduce(Matrex.zeros(g[:rows], 1), fn i, glmt ->
-        i = trunc(i)
-        Matrex.set(glmt, i, 1, glmt[i] + 1)
-      end)
+    # glmt: items neither fitted nor determined no fit at entry - for vmiss
+    glmt = for {i, 0} <- g, do: i
 
-    ok = false
+    it0 = for {i, 1} <- g, do: it[i]
+    kt0 = it[id]
+    nlmt = gbp4d_solver_dpp_main_create_nlmt(nlvl, ctx.nastr)
 
-    # create ktlist
-    it0 = Matrix.get_columns(it, Matrix.find(g, 1))
-    xp0 = xp
-    kt0 = Matrex.column(it, id)
-    nlmt = gbp4d_solver_dpp_main_create_nlmt(nlvl, nastr)
+    ktlist = It.gbp4d_it_create_ktlist(ctx.bn, it0, xp, kt0, nlmt)
 
-    ktlist = Gbp4d.It.gbp4d_it_create_ktlist(bn, it0, xp0, kt0, nlmt)
-
-    try do
-      # main
-      if nlvl == 1 do
-        # fit final it in queue
+    cond do
+      nlvl == 1 ->
         if ktlist.n > 0 do
-          it = Matrex.set_column(it, id, Matrex.column(ktlist.kt, 1))
-          g = Matrex.set(g, id, 1, 1)
-          u = u + v[id]
+          it = Map.put(it, id, hd(ktlist.kt))
+          g = Map.put(g, id, 1)
+          u = u + ctx.v[id]
 
-          {itastr, gastr, uastr} =
-            if u > uastr do
-              {it, g, u}
-            else
-              {itastr, gastr, uastr}
-            end
+          best = if u > best.uastr, do: %{itastr: it, gastr: g, uastr: u}, else: best
 
-          ok =
-            if uastr == vastr || Matrix.all?(gastr, 1) do
-              true
-            else
-              ok
-            end
-
-          {ok, it, itastr, xp, gastr, uastr}
+          {best.uastr == ctx.vastr or all_fitted?(best.gastr), best}
         else
-          g = Matrex.set(g, id, 1, 2)
-          {ok, it, itastr, xp, gastr, uastr}
+          {false, best}
         end
-      else
-        # do recursive call
 
-        if ktlist.n > 0 do
-          g = Matrex.set(g, id, 1, 1)
+      ktlist.n > 0 ->
+        g1 = Map.put(g, id, 1)
+        u1 = u + ctx.v[id]
 
-          u = u + v[id]
+        {ok, best} =
+          Enum.zip(ktlist.kt, ktlist.xp)
+          |> Enum.reduce_while({false, best}, fn {kt, xp1}, {_ok, best} ->
+            it1 = Map.put(it, id, kt)
 
-          {ok, it, itastr, xp, gastr, uastr} =
-            Enum.reduce_while(1..ktlist.n, {ok, it, itastr, xp, gastr, uastr}, fn i,
-                                                                                  {_, it, itastr,
-                                                                                   _, gastr,
-                                                                                   uastr} ->
-              it = Matrex.set_column(it, id, Matrex.column(ktlist.kt, i))
-              xp = Enum.at(ktlist.xp, i - 1)
+            best = if u1 > best.uastr, do: %{itastr: it1, gastr: g1, uastr: u1}, else: best
 
-              {itastr, gastr, uastr} =
-                if u > uastr do
-                  {it, g, u}
-                else
-                  {itastr, gastr, uastr}
-                end
-
-              if uastr == vastr || Matrix.all?(gastr, 1) do
-                ok = true
-                throw({:return, {ok, it, itastr, xp, gastr, uastr}})
-              else
-                {ok, it, itastr, xp, gastr, uastr} =
-                  gbp4d_solver_dpp_main(
-                    bn,
-                    it,
-                    itastr,
-                    xp,
-                    q,
-                    nlvl - 1,
-                    nastr,
-                    g,
-                    gastr,
-                    v,
-                    vastr,
-                    u,
-                    uastr
-                  )
-
-                if ok do
-                  {:halt, {ok, it, itastr, xp, gastr, uastr}}
-                else
-                  {:cont, {ok, it, itastr, xp, gastr, uastr}}
-                end
-              end
-            end)
-
-          # what if skip this it? can later it combined be better?
-          if !ok && nlvl < @gbp4d_nlvl_mkt2 do
-            vmiss =
-              case Matrix.find({gastr, &!=/2, 1}, :and, {glmt, &==/2, 1}) do
-                nil ->
-                  0.0
-
-                r ->
-                  Matrix.get_rows(v, r)
-                  |> Matrix.sum()
-              end
-
-            if vmiss > v[id] do
-              g = Matrex.set(g, id, 1, 2)
-              u = u - v[id]
-
-              it =
-                it
-                |> Matrex.set(1, id, 0)
-                |> Matrex.set(2, id, 0)
-                |> Matrex.set(3, id, 0)
-                |> Matrex.set(4, id, 0)
-
-              xp = xp0
-
-              gbp4d_solver_dpp_main(
-                bn,
-                it,
-                itastr,
-                xp,
-                q,
-                nlvl - 1,
-                nastr,
-                g,
-                gastr,
-                v,
-                vastr,
-                u,
-                uastr
-              )
+            if best.uastr == ctx.vastr or all_fitted?(best.gastr) do
+              {:halt, {true, best}}
             else
-              {ok, it, itastr, xp, gastr, uastr}
+              case gbp4d_solver_dpp_main(ctx, it1, xp1, nlvl - 1, g1, u1, best) do
+                {true, best} -> {:halt, {true, best}}
+                {false, best} -> {:cont, {false, best}}
+              end
             end
+          end)
+
+        # what if skip this it? can later it combined be better?
+        if not ok and nlvl < @gbp4d_nlvl_mkt2 do
+          vmiss =
+            glmt
+            |> Enum.filter(fn i -> best.gastr[i] != 1 end)
+            |> Enum.reduce(0.0, fn i, acc -> acc + ctx.v[i] end)
+
+          if vmiss > ctx.v[id] do
+            g2 = Map.put(g, id, 2)
+            gbp4d_solver_dpp_main(ctx, it, xp, nlvl - 1, g2, u, best)
           else
-            {ok, it, itastr, xp, gastr, uastr}
+            {false, best}
           end
         else
-          g = Matrex.set(g, id, 1, 2)
-
-          gbp4d_solver_dpp_main(
-            bn,
-            it,
-            itastr,
-            xp,
-            q,
-            nlvl - 1,
-            nastr,
-            g,
-            gastr,
-            v,
-            vastr,
-            u,
-            uastr
-          )
+          {ok, best}
         end
-      end
-    catch
-      {:return, {ok, it, itastr, xp, gastr, uastr}} ->
-        {ok, it, itastr, xp, gastr, uastr}
+
+      true ->
+        g2 = Map.put(g, id, 2)
+        gbp4d_solver_dpp_main(ctx, it, xp, nlvl - 1, g2, u, best)
     end
   end
 
-  @spec gbp4d_solver_dpp_main_create_nastr(%Matrex{}, %Matrex{}, %Matrex{}) :: number
-  def gbp4d_solver_dpp_main_create_nastr(p, ldhw, m) do
-    # init
-    q = Matrix.sort_index(p, :desc)
+  defp all_fitted?(gastr) do
+    Enum.all?(gastr, fn {_, s} -> s == 1 end)
+  end
 
-    v =
-      Matrex.multiply(Matrex.row(ldhw, 1), Matrex.row(ldhw, 2))
-      |> Matrex.multiply(Matrex.row(ldhw, 3))
-      |> Matrex.transpose()
+  @doc """
+  Number of items certain to be left over due to the bin volume or weight
+  limit, walking the fit sequence accumulating volume and weight.
+  """
+  @spec gbp4d_solver_dpp_main_create_nastr([float], [tuple], tuple) :: non_neg_integer
+  def gbp4d_solver_dpp_main_create_nastr(p, ldhw, {ml, md, mh, mw}) do
+    n = length(p)
 
-    w = Matrex.transpose(Matrex.row(ldhw, 4))
+    q =
+      0..(n - 1)
+      |> Enum.sort_by(fn i -> -Enum.at(p, i) end)
 
-    mv = Matrix.prod(Matrix.subvec(m, 1, 3))
+    v = Enum.map(ldhw, fn {l, d, h, _} -> l * d * h end) |> List.to_tuple()
+    w = Enum.map(ldhw, fn {_, _, _, wt} -> wt / 1 end) |> List.to_tuple()
 
-    mw = m[4]
+    mv = ml * md * mh
 
-    # main
-    v0 = 0.00
-    w0 = 0.00
-    nastr = 0
+    {nastr, _, _, _} =
+      Enum.reduce_while(Enum.with_index(q), {0, 0.0, 0.0, n}, fn {qi, i}, {nastr, v0, w0, n} ->
+        v0 = v0 + elem(v, qi)
+        w0 = w0 + elem(w, qi)
 
-    {_, _, nastr} =
-      Enum.reduce_while(1..q[:rows], {v0, w0, nastr}, fn i, {v0, w0, nastr} ->
-        qi = trunc(q[i] + 1)
-        v0 = v0 + v[qi]
-        w0 = w0 + w[qi]
-
-        if v0 >= mv || w0 >= mw do
-          nastr = q[:rows] - i
-          {:halt, {v0, w0, nastr}}
+        if v0 >= mv or w0 >= mw do
+          {:halt, {n - 1 - i, v0, w0, n}}
         else
-          {:cont, {v0, w0, nastr}}
+          {:cont, {nastr, v0, w0, n}}
         end
       end)
 
     nastr
   end
 
-  def gbp4d_solver_dpp_prep_create_p(ldhw, m) do
-    # init
-    p = Matrex.zeros(ldhw[:cols], 1)
-
-    if ldhw == nil || ldhw[:cols] == 0 || m == nil do
-      p
-    else
-      # main
-      q = Matrex.zeros(3, ldhw[:cols])
-
-      # create it w cluster w.r.t gbp1d
-      v =
-        Matrex.multiply(Matrex.row(ldhw, 1), Matrex.row(ldhw, 2))
-        |> Matrex.multiply(Matrex.row(ldhw, 3))
-
-      w =
-        Matrex.divide(Matrex.row(ldhw, 4), 0.25)
-        |> Matrex.apply(:ceil)
-
-      c = Float.floor(m[4] / 0.25)
-
-      wfit = Gbp1d.gbp1d_solver_dpp(v, w, c)
-
-      q =
-        Enum.reduce(1..ldhw[:cols], q, fn i, q ->
-          if wfit.k[i] == 1 do
-            Matrex.set(q, 1, i, 1.0)
-          else
-            Matrex.set(q, 1, i, 0.0)
-          end
-        end)
-
-      # create it max(l, d, h) cluster w.r.t bn max(l, d, h) into per 0.25 inch
-      mldh =
-        Matrix.subvec(m, 1, 3)
-        |> Matrex.max()
-
-      ildh =
-        Matrix.get_rows(ldhw, [1, 2, 3])
-        |> Matrix.max()
-
-      nldh = Matrix.linspace(0, mldh, Float.ceil(mldh * 4.0))
-
-      q =
-        Enum.reduce(1..ldhw[:cols], q, fn i, q ->
-          Matrex.set(
-            q,
-            2,
-            i,
-            Matrix.find(nldh, &<=/2, ildh[i])
-            |> Matrex.subtract(1)
-            |> Matrix.sum()
-          )
-        end)
-
-      row =
-        Matrex.multiply(Matrex.row(ldhw, 1), Matrex.row(ldhw, 2))
-        |> Matrex.multiply(Matrex.row(ldhw, 3))
-        |> Matrex.divide(ildh)
-
-      q = Matrix.set_rows(q, Matrex.new([[3]]), row)
-
-      # sort index after sort index via rows so that it with higher value of p can get fit into bn earlier in queue
-      GbpU.sort_index_via_rows(q, Matrix.linspace(0, 2, 3))
-      |> Matrix.sort_index()
+  @doc """
+  Limit on the number of candidate placements searched per level.
+  """
+  @spec gbp4d_solver_dpp_main_create_nlmt(non_neg_integer, non_neg_integer) :: non_neg_integer
+  def gbp4d_solver_dpp_main_create_nlmt(nlvl, nastr) do
+    cond do
+      nlvl <= nastr -> 1
+      nlvl - nastr < @gbp4d_nlvl_mkt0 -> 0
+      nlvl - nastr < @gbp4d_nlvl_mkt1 -> 5
+      nlvl - nastr < @gbp4d_nlvl_mkt2 -> 3
+      nlvl - nastr < @gbp4d_nlvl_mkt3 -> 2
+      true -> 1
     end
   end
 
-  def gbp4d_solver_dpp_main_create_nlmt(nlvl, nastr) do
-    nlmt = 1
+  @doc """
+  Create the profit vector `p` via clustering on weight (knapsack fit),
+  max(l, d, h) bucket and area, so that items with higher `p` get fit into
+  the bin earlier in the queue.
 
-    if nlvl <= nastr do
-      nlmt
-    else
-      cond do
-        nlvl - nastr < @gbp4d_nlvl_mkt0 ->
-          0
+  `ldhw` is a list of `{l, d, h, w}` tuples, `m` the bin `{l, d, h, w}`.
+  """
+  @spec gbp4d_solver_dpp_prep_create_p([tuple], tuple) :: [float]
+  def gbp4d_solver_dpp_prep_create_p(ldhw, m)
 
-        nlvl - nastr < @gbp4d_nlvl_mkt1 ->
-          5
+  def gbp4d_solver_dpp_prep_create_p([], _m), do: []
 
-        nlvl - nastr < @gbp4d_nlvl_mkt2 ->
-          3
+  def gbp4d_solver_dpp_prep_create_p(ldhw, {ml, md, mh, mw}) do
+    # q0: cluster on weight w.r.t gbp1d knapsack at 0.25 granularity
+    v = Enum.map(ldhw, fn {l, d, h, _} -> l * d * h end)
+    w = Enum.map(ldhw, fn {_, _, _, wt} -> ceil(wt / 0.25) end)
+    c = trunc(Float.floor(mw / 0.25))
 
-        nlvl - nastr < @gbp4d_nlvl_mkt3 ->
-          2
+    wfit = Gbp1d.gbp1d_solver_dpp(v, w, c)
 
-        true ->
-          nlmt
-      end
-    end
+    q0 = Enum.map(wfit.k, fn ki -> if ki == 1, do: 1.0, else: 0.0 end)
+
+    # q1: cluster on max(l, d, h) w.r.t bn max(l, d, h) into per 0.25 inch
+    mldh = Enum.max([ml, md, mh])
+    ildh = Enum.map(ldhw, fn {l, d, h, _} -> Enum.max([l, d, h]) end)
+
+    nldh = linspace(0.0, mldh, ceil(mldh * 4.0))
+
+    q1 =
+      Enum.map(ildh, fn iv ->
+        # sum of 0-based indices of nldh values <= iv
+        k = Enum.count(nldh, &(&1 <= iv))
+        k * (k - 1) / 2
+      end)
+
+    # q2: area - volume over max dimension (0-dimension items rank lowest)
+    q2 = Enum.zip(v, ildh) |> Enum.map(fn {vi, ii} -> if ii == 0.0, do: 0.0, else: vi / ii end)
+
+    # rank items by (q0, q1, q2) ascending - higher rank fits earlier
+    order =
+      Enum.zip([q0, q1, q2])
+      |> Enum.with_index()
+      |> Enum.sort_by(fn {key, _i} -> key end)
+      |> Enum.map(fn {_key, i} -> i end)
+
+    order
+    |> Enum.with_index()
+    |> Enum.sort_by(fn {i, _rank} -> i end)
+    |> Enum.map(fn {_i, rank} -> rank / 1 end)
+  end
+
+  # arma::linspace - num evenly spaced values from start to stop inclusive
+  defp linspace(_start, stop, num) when num <= 1, do: [stop]
+
+  defp linspace(start, stop, num) do
+    step = (stop - start) / (num - 1)
+    Enum.map(0..(num - 1), fn i -> start + step * i end)
   end
 end

@@ -1,492 +1,253 @@
 defmodule Robox.Gbp4d.Xp do
-  alias Robox.{GbpU, Matrix}
+  @moduledoc """
+  Extreme point calculation for gbp4d, mirroring gbp/src/gbp4d_xp.cpp.
 
-  def gbp4d_xp_create_xp(_bn, _it) do
+  An item `it`, a candidate `kt` and an extreme point `xp` are all 8-element
+  tuples `{x, y, z, w, l, d, h, wt}`:
+
+    * `x, y, z` position in the bin, `w` cumulative weight held when placed
+    * `l, d, h` scale along x, y, z; `wt` weight (for an extreme point these
+      are the residual space along x, y, z and the residual weight)
+
+  A bin `bn` is a 4-element tuple `{l, d, h, w}`.
+  """
+
+  @tol 1.0e-8
+
+  @doc """
+  Calculate the extreme points of a bin holding the items `its` from scratch.
+  """
+  @spec gbp4d_xp_create_xp(tuple, [tuple]) :: [tuple]
+  def gbp4d_xp_create_xp({bl, bd, bh, bw}, its) do
+    # fit items one by one in z, y, x order - mimic fit sequence
+    sorted = Enum.sort_by(its, fn {x, y, z, _, _, _, _, _} -> {z, y, x} end)
+
+    xp0 = [{0.0, 0.0, 0.0, 0.0, bl / 1, bd / 1, bh / 1, bw / 1}]
+
+    sorted
+    |> Enum.with_index()
+    |> Enum.reduce(xp0, fn {kt, i}, xp ->
+      gbp4d_xp_update_xp({bl, bd, bh, bw}, Enum.take(sorted, i), kt, xp)
+    end)
   end
 
-  @spec gbp4d_xp_update_xp(%Matrex{}, %Matrex{}, %Matrex{}, %Matrex{}) :: %Matrex{}
-  def gbp4d_xp_update_xp(bn, it, kt, xp) do
-    try do
-      # init
-      xp =
-        if it == nil && kt == nil do
-          xp =
-            Matrex.zeros(8, 1)
-            |> Matrex.set(5, 1, bn[1])
-            |> Matrex.set(6, 1, bn[2])
-            |> Matrex.set(7, 1, bn[3])
-            |> Matrex.set(8, 1, bn[4])
+  @doc """
+  Update the extreme point list `xp` after fitting item `kt` into the bin `bn`
+  already holding items `its` (`its` must not include `kt`).
+  """
+  @spec gbp4d_xp_update_xp(tuple, [tuple], tuple, [tuple]) :: [tuple]
+  def gbp4d_xp_update_xp({bl, bd, bh, bw}, its, kt, xp) do
+    # remove extreme points taken by or fallen into kt and
+    # update residual space of surviving extreme points w.r.t kt
+    xp = gbp4d_xp_update_xp_ikt(kt, xp)
 
-          throw({:return, xp})
-        else
-          xp
-        end
+    {ktx, kty, ktz, ktw, ktl, ktd, kth, ktwt} = kt
 
-      # construct xp input
-      # remove extreme points that is taken by or fallen into kt
-      # and also update it extreme point residual space w.r.t kt
-      xp = gbp4d_xp_update_xp_ikt(it, kt, xp)
+    # maxBound: 6 projection positions, from the 3 corner points of kt
+    # projected back onto items (or the bin walls at 0)
+    mb = Enum.reduce(its, {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}, &gbp4d_xp_update_maxbnd(&1, kt, &2))
+    {mb0, mb1, mb2, mb3, mb4, mb5} = mb
 
-      # calculate xp output
-      # calculate new extreme points from 6 projections of 3 points
-      xp_update = Matrex.fill(8, 6, :nan)
+    wp = ktw + ktwt
 
-      # maxBound: track 6 projection xp position location
-      # from min x-left y-behind z-bottom (w-weight) to max x-right y-front z-top (w-weight)
-      # arma::vec maxBound = arma::zeros<arma::vec>(6) - 1; // init maxBound without itBnd save computing cost
-      max_bound = Matrex.zeros(6, 1)
+    # 6 candidate new extreme points
+    positions = [
+      {ktx + ktl, mb0, ktz, wp},
+      {ktx + ktl, kty, mb1, wp},
+      {ktx, kty + ktd, mb2, wp},
+      {mb3, kty + ktd, ktz, wp},
+      {mb4, kty, ktz + kth, wp},
+      {ktx, mb5, ktz + kth, wp}
+    ]
 
-      # minBound: track 6 projection xp residual space as
-      # from max x-right y-front z-top (w-weight) to min x-left y-behind z-bottom (w-weight)
-      min_bound =
-        Enum.reduce(1..6, Matrex.zeros(4, 6), fn i, min_bound ->
-          min_bound
-          # init x-right of all 6 projected extreme point
-          |> Matrex.set(1, i, bn[1])
-          # init y-front of all 6 projected extreme point
-          |> Matrex.set(2, i, bn[2])
-          # init z-top   of all 6 projected extreme point
-          |> Matrex.set(3, i, bn[3])
-          # init w-wlmt  of all 6 projected extreme point
-          |> Matrex.set(4, i, bn[4])
+    # minBound: residual space upper corner for each candidate, shrunk by
+    # items standing between the candidate position and the bin walls
+    min_bounds =
+      Enum.map(positions, fn pos ->
+        Enum.reduce(its, {bl / 1, bd / 1, bh / 1, bw / 1}, fn it, minb ->
+          gbp4d_xp_update_minbnd(it, pos, minb)
         end)
+      end)
 
-      # calculate xp_update x, y, z, w extreme point position
+    candidates =
+      Enum.zip(positions, min_bounds)
+      |> Enum.map(fn {{px, py, pz, pw}, {mx, my, mz, mw}} ->
+        {px, py, pz, pw, mx - px, my - py, mz - pz, mw - pw}
+      end)
 
-      {_, xp_update} = gbp4d_xp_update_xp_spg(it, kt, max_bound, xp_update)
-
-      # calculate xpUpdate l, d, h, w residual space along x, y, z, w
-      {_, xp_update} = gbp4d_xp_update_rs_spg(it, kt, min_bound, xp_update)
-
-      # prog xp_update remove nan in x, y, z, w, l, d, h, w
-      g =
-        Enum.reduce(1..7, Matrex.zeros(6, 1), fn i, g ->
-          if Matrex.at(xp_update, i, 1) == :nan do
-            Matrex.set(g, i, 1, 1)
-          else
-            g
-          end
-        end)
-
-      xp_update = Matrix.get_columns(xp_update, Matrix.find(g, 0))
-
-      # join xpUpdate into xp
-      # xp is rounded for comparison in unique_cols/1
-      xp =
-        Matrix.concat(xp, xp_update)
-        |> Matrex.apply(fn val ->
-          Float.round(val, 2)
-        end)
-        |> GbpU.unique_cols()
-        |> gbp4d_xp_purify_xp()
-
-      # sort xp via non-decreasing order of z, y, x
-      ulmt = Matrix.linspace(2, 0, 3)
-
-      GbpU.sort_via_rows(xp, ulmt)
-    catch
-      {:return, xp} -> xp
-    end
+    (xp ++ candidates)
+    |> unique_cols()
+    |> gbp4d_xp_purify_xp()
+    |> Enum.sort_by(fn {x, y, z, _, _, _, _, _} -> {z, y, x} end)
   end
 
+  @doc """
+  Remove extreme points with zero residual space and extreme points dominated
+  by another extreme point in the list.
+  """
+  @spec gbp4d_xp_purify_xp([tuple]) :: [tuple]
   def gbp4d_xp_purify_xp(xp) do
-    # remove xp with residual space == 0
-    g0 =
-      Enum.reduce(1..xp[:cols], Matrex.zeros(xp[:cols], 1), fn i, g0 ->
-        if xp[4][i] == 0 || xp[5][i] == 0 || xp[6][i] == 0 || xp[7][i] == 0 do
-          Matrex.set(g0, i, 1, 1)
+    xp =
+      Enum.reject(xp, fn {_, _, _, _, l, d, h, w} ->
+        l == 0.0 or d == 0.0 or h == 0.0 or w == 0.0
+      end)
+
+    Enum.reject(xp, fn {xj, yj, zj, _, lj, dj, hj, _} = j ->
+      Enum.any?(xp, fn {xi, yi, zi, _, li, di, hi, _} = i ->
+        i != j and xi <= xj and yi <= yj and zi <= zj and
+          li >= lj and di >= dj and hi >= hj
+      end)
+    end)
+  end
+
+  @doc """
+  Remove extreme points taken by or fallen into `kt`, then update the residual
+  space of the remaining extreme points w.r.t `kt`.
+  """
+  @spec gbp4d_xp_update_xp_ikt(tuple, [tuple]) :: [tuple]
+  def gbp4d_xp_update_xp_ikt({ktx, kty, ktz, _ktw, ktl, ktd, kth, ktwt}, xp) do
+    xp
+    |> Enum.reject(fn {x, y, z, _, _, _, _, _} ->
+      ktx <= x and x < ktx + ktl and
+        kty <= y and y < kty + ktd and
+        ktz <= z and z < ktz + kth
+    end)
+    |> Enum.map(fn {x, y, z, w, l, d, h, wt} ->
+      l =
+        if x <= ktx and y >= kty and y < kty + ktd and z >= ktz and z < ktz + kth do
+          min(l, ktx - x)
         else
-          g0
+          l
         end
-      end)
 
-    xp = Matrix.get_columns(xp, Matrix.find(g0, 0))
-
-    # remove xp dominated by other xp in list
-    # if x, y, z, w < x', y', z', w' and l, d, h, w > l', d', h', w' then
-    # (x, y, z, w, l, d, h, w) dominant (x', y', z', w', l', d', h', w')
-    # so remove (x', y', z', w', l', d', h', w') from xp list
-
-    if xp do
-      g1 =
-        Enum.reduce(1..xp[:cols], Matrex.zeros(xp[:cols], 1), fn i, g1 ->
-          Enum.reduce(1..xp[:cols], g1, fn j, g1 ->
-            # xp[4][i] <= xp[3][j] && // w == w' always true - w and w' are both sum of weight of all it in bn
-            # && xp[8][i] >= xp[8][j] // w == w' always true - w and w' are both residual weight available for bn
-            if i != j && xp[1][i] <= xp[1][j] && xp[2][i] <= xp[2][j] && xp[3][i] <= xp[3][j] &&
-                 xp[5][i] >= xp[5][j] && xp[6][i] >= xp[6][j] && xp[7][i] >= xp[7][j] do
-              Matrex.set(g1, j, 1, 1)
-            else
-              g1
-            end
-          end)
-        end)
-
-      Matrix.get_columns(xp, Matrix.find(g1, 0))
-    end
-  end
-
-  @spec gbp4d_xp_update_xp_ikt(%Matrex{}, %Matrex{}, %Matrex{}) :: %Matrex{}
-  def gbp4d_xp_update_xp_ikt(_it, kt, xp) do
-    # remove extreme points that is taken by or fallen into kt
-    vlmt = Matrex.zeros(xp[:cols], 1)
-
-    vlmt =
-      Enum.reduce(1..xp[:cols], vlmt, fn i, vlmt ->
-        if kt[1] <= Matrex.at(xp, 1, i) && Matrex.at(xp, 1, i) < kt[1] + kt[5] &&
-             kt[2] <= Matrex.at(xp, 2, i) && Matrex.at(xp, 2, i) < kt[2] + kt[6] &&
-             kt[3] <= Matrex.at(xp, 3, i) && Matrex.at(xp, 3, i) < kt[3] + kt[7] do
-          # kt[4] <= xp[4][i] && xp[4][i] < kt[4] + kt[8] // always true as long as kt(7) > 0
-          # kt[4] == xp[4][i] for all i - both weight of all it in bn, kt(7) weight of new kt
-          Matrex.set(vlmt, i, 1, 1)
+      d =
+        if y <= kty and z >= ktz and z < ktz + kth and x >= ktx and x < ktx + ktl do
+          min(d, kty - y)
         else
-          vlmt
+          d
         end
-      end)
 
-    xp = Matrix.get_columns(xp, Matrix.find(vlmt, 0))
+      h =
+        if z <= ktz and x >= ktx and x < ktx + ktl and y >= kty and y < kty + ktd do
+          min(h, ktz - z)
+        else
+          h
+        end
 
-    if xp != nil do
-      # and also update it extreme point residual space w.r.t kt
-      Enum.reduce(1..xp[:cols], xp, fn i, xp ->
-        xp =
-          if Matrex.at(xp, 1, i) <= kt[1] && Matrex.at(xp, 2, i) >= kt[2] &&
-               Matrex.at(xp, 2, i) < kt[2] + kt[6] && Matrex.at(xp, 3, i) >= kt[3] &&
-               Matrex.at(xp, 3, i) < kt[3] + kt[7] do
-            Matrex.set(xp, 5, i, min(Matrex.at(xp, 5, i), kt[1] - Matrex.at(xp, 1, i)))
-          else
-            xp
-          end
-
-        xp =
-          if Matrex.at(xp, 2, i) <= kt[2] && Matrex.at(xp, 3, i) >= kt[3] &&
-               Matrex.at(xp, 3, i) < kt[3] + kt[7] && Matrex.at(xp, 1, i) >= kt[1] &&
-               Matrex.at(xp, 1, i) < kt[1] + kt[5] do
-            Matrex.set(xp, 6, i, min(Matrex.at(xp, 6, i), kt[2] - Matrex.at(xp, 2, i)))
-          else
-            xp
-          end
-
-        xp =
-          if Matrex.at(xp, 3, i) <= kt[3] && Matrex.at(xp, 1, i) >= kt[1] &&
-               Matrex.at(xp, 1, i) < kt[1] + kt[5] && Matrex.at(xp, 2, i) >= kt[2] &&
-               Matrex.at(xp, 2, i) < kt[2] + kt[6] do
-            Matrex.set(xp, 7, i, min(Matrex.at(xp, 7, i), kt[3] - Matrex.at(xp, 3, i)))
-          else
-            xp
-          end
-
-        xp
-        # weight on separate single dimension - weight is holding
-        |> Matrex.set(4, i, Matrex.at(xp, 4, i) + kt[8])
-        # weight on separate single dimension - weight available
-        |> Matrex.set(8, i, Matrex.at(xp, 8, i) - kt[8])
-      end)
-    else
-      xp
-    end
+      # weight on separate single dimension: weight holding grows, available shrinks
+      {x, y, z, w + ktwt, l, d, h, wt - ktwt}
+    end)
   end
 
-  def gbp4d_xp_update_xp_spg(it, kt, max_bound, xp_update) do
-    max_bound =
-      if it do
-        Enum.reduce(1..it[:cols], max_bound, fn i, max_bound ->
-          gbp4d_xp_update_maxbnd(Matrex.column(it, i), kt, max_bound)
-        end)
-      else
-        max_bound
-      end
+  @doc """
+  Shrink the residual space bound `{mx, my, mz, mw}` of a candidate extreme
+  point at `pos` w.r.t a single item `it` standing in the way.
+  """
+  @spec gbp4d_xp_update_minbnd(tuple, tuple, tuple) :: tuple
+  def gbp4d_xp_update_minbnd(it, {px, py, pz, pw}, {mx, my, mz, mw}) do
+    {itx, ity, itz, _, _, _, _, _} = it
 
-    xp_update =
-      xp_update
-      |> Matrex.set(1, 1, kt[1] + kt[5])
-      |> Matrex.set(2, 1, max_bound[1])
-      |> Matrex.set(3, 1, kt[3])
-      # weight on separate single dimension 
-      |> Matrex.set(4, 1, kt[4] + kt[8])
-      |> Matrex.set(1, 2, kt[1] + kt[5])
-      |> Matrex.set(2, 2, kt[2])
-      |> Matrex.set(3, 2, max_bound[2])
-      # weight on separate single dimension
-      |> Matrex.set(4, 2, kt[4] + kt[8])
-      |> Matrex.set(1, 3, kt[1])
-      |> Matrex.set(2, 3, kt[2] + kt[6])
-      |> Matrex.set(3, 3, max_bound[3])
-      # weight on separate single dimension
-      |> Matrex.set(4, 3, kt[4] + kt[8])
-      |> Matrex.set(1, 4, max_bound[4])
-      |> Matrex.set(2, 4, kt[2] + kt[6])
-      |> Matrex.set(3, 4, kt[3])
-      # weight on separate single dimension
-      |> Matrex.set(4, 4, kt[4] + kt[8])
-      |> Matrex.set(1, 5, max_bound[5])
-      |> Matrex.set(2, 5, kt[2])
-      |> Matrex.set(3, 5, kt[3] + kt[7])
-      # weight on separate single dimension
-      |> Matrex.set(4, 5, kt[4] + kt[8])
-      |> Matrex.set(1, 6, kt[1])
-      |> Matrex.set(2, 6, max_bound[6])
-      |> Matrex.set(3, 6, kt[3] + kt[7])
-      # weight on separate single dimension
-      |> Matrex.set(4, 6, kt[4] + kt[8])
+    # a virtual kt as a single point with no scale at the candidate position
+    akt = {px, py, pz, pw, 0.0, 0.0, 0.0, 0.0}
 
-    {max_bound, xp_update}
+    {ik0, ik1, ik2, ik3, ik4, ik5} = gbp4d_xp_it_qjt_kt(it, akt)
+
+    mx = if ik3 and ik4, do: min(itx, mx), else: mx
+    my = if ik5 and ik0, do: min(ity, my), else: my
+    mz = if ik1 and ik2, do: min(itz, mz), else: mz
+
+    {mx, my, mz, mw}
   end
 
-  def gbp4d_xp_update_rs_spg(it, kt, min_bound, xp_update) do
-    min_bound =
-      if it do
-        Enum.reduce(1..it[:cols], min_bound, fn i, min_bound ->
-          gbp4d_xp_update_minbnd(Matrex.column(it, i), kt, min_bound, xp_update)
-        end)
-      else
-        min_bound
-      end
+  @doc """
+  Raise the projection bounds `maxBound` of the new extreme points spawned by
+  `kt` w.r.t a single item `it` that can take the projection.
+  """
+  @spec gbp4d_xp_update_maxbnd(tuple, tuple, tuple) :: tuple
+  def gbp4d_xp_update_maxbnd(it, kt, {mb0, mb1, mb2, mb3, mb4, mb5}) do
+    {itx, ity, itz, _, itl, itd, ith, _} = it
 
-    xp_update =
-      Enum.reduce(1..6, xp_update, fn i, xp_update ->
-        xp_update
-        |> Matrex.set(5, i, min_bound[1][i] - xp_update[1][i])
-        |> Matrex.set(6, i, min_bound[2][i] - xp_update[2][i])
-        |> Matrex.set(7, i, min_bound[3][i] - xp_update[3][i])
-        # weight on separate single dimension
-        |> Matrex.set(8, i, min_bound[4][i] - xp_update[4][i])
-      end)
+    {ik0, ik1, ik2, ik3, ik4, ik5} = gbp4d_xp_it_pjt_kt(it, kt)
 
-    {min_bound, xp_update}
+    mb0 = if ik0 and ity + itd > mb0, do: ity + itd, else: mb0
+    mb1 = if ik1 and itz + ith > mb1, do: itz + ith, else: mb1
+    mb2 = if ik2 and itz + ith > mb2, do: itz + ith, else: mb2
+    mb3 = if ik3 and itx + itl > mb3, do: itx + itl, else: mb3
+    mb4 = if ik4 and itx + itl > mb4, do: itx + itl, else: mb4
+    mb5 = if ik5 and ity + itd > mb5, do: ity + itd, else: mb5
+
+    {mb0, mb1, mb2, mb3, mb4, mb5}
   end
 
-  def gbp4d_xp_update_minbnd(it, _kt, min_bound, xp_update) do
-    # projecting kt xp -> it on reverse direction w.r.t gbp3d_xp_it_pjt_kt.png
-    # arma::uvec ik = gbp4d_xp_it_qjt_kt(it, kt);
-
-    # construct virtual kt as xpUpdate with l = 0, d = 0, h = 0, w = 0
-    # since residual space of extreme point is related to the x, y, z, w of exteme point itself
-    akt = Matrex.zeros(8, 1)
-    aik = Matrex.zeros(6, 1)
-
-    {_, _, min_bound} =
-      Enum.reduce(1..6, {akt, aik, min_bound}, fn i, {akt, _aik, min_bound} ->
-        # init
-        # init residual space without creating another itBnd and save computation cost (skip)
-        # xpUpdate(4, i) = minBound(0, i) - xpUpdate(0, i);
-        # xpUpdate(5, i) = minBound(1, i) - xpUpdate(1, i);
-        # xpUpdate(6, i) = minBound(2, i) - xpUpdate(2, i);
-        # xpUpdate(7, i) = minBound(3, i) - xpUpdate(3, i);
-
-        # create a virtual kt as a single point with l = 0, d = 0, h = 0, w = 0
-        akt =
-          akt
-          |> Matrex.set(1, 1, xp_update[1][i])
-          |> Matrex.set(2, 1, xp_update[2][i])
-          |> Matrex.set(3, 1, xp_update[3][i])
-          |> Matrex.set(4, 1, xp_update[4][i])
-          |> Matrex.set(5, 1, 0.00)
-          |> Matrex.set(6, 1, 0.00)
-          |> Matrex.set(7, 1, 0.00)
-          |> Matrex.set(8, 1, 0.00)
-
-        # projecting kt xp -> it on reverse direction w.r.t gbp3d_xp_it_pjt_kt.png
-        aik = gbp4d_xp_it_qjt_kt(it, akt)
-
-        # since akt(4) = 0.00; akt(5) = 0.00; akt(6) = 0.00; =>
-        # aik(0) == aik(5); aik(1) == aik(2); aik(3) == aik(4);
-
-        # it block on the way from extreme point to x-right
-        min_bound =
-          if aik[4] > 0 && aik[5] > 0 do
-            Matrex.set(min_bound, 1, i, min(it[1], min_bound[1][i]))
-          else
-            min_bound
-          end
-
-        min_bound =
-          if aik[6] > 0 && aik[1] > 0 do
-            Matrex.set(min_bound, 2, i, min(it[2], min_bound[2][i]))
-          else
-            min_bound
-          end
-
-        min_bound =
-          if aik[2] > 0 && aik[3] > 0 do
-            Matrex.set(min_bound, 3, i, min(it[3], min_bound[3][i]))
-          else
-            min_bound
-          end
-
-        {akt, aik, min_bound}
-      end)
-
-    min_bound
+  @doc """
+  Can item `it` take the projection of the extreme points created by `kt`, on
+  the reverse direction (directions xY, xZ, yZ, yX, zX, zY).
+  """
+  @spec gbp4d_xp_it_qjt_kt(tuple, tuple) :: tuple
+  def gbp4d_xp_it_qjt_kt(
+        {itx, ity, itz, _, itl, itd, ith, _},
+        {ktx, kty, ktz, _, ktl, ktd, kth, _}
+      ) do
+    {
+      kty + ktd <= ity and itx <= ktx + ktl and ktx + ktl < itx + itl and
+        itz <= ktz and ktz < itz + ith,
+      ktz + kth <= itz and itx <= ktx + ktl and ktx + ktl < itx + itl and
+        ity <= kty and kty < ity + itd,
+      ktz + kth <= itz and ity <= kty + ktd and kty + ktd < ity + itd and
+        itx <= ktx and ktx < itx + itl,
+      ktx + ktl <= itx and ity <= kty + ktd and kty + ktd < ity + itd and
+        itz <= ktz and ktz < itz + ith,
+      ktx + ktl <= itx and itz <= ktz + kth and ktz + kth < itz + ith and
+        ity <= kty and kty < ity + itd,
+      kty + ktd <= ity and itz <= ktz + kth and ktz + kth < itz + ith and
+        itx <= ktx and ktx < itx + itl
+    }
   end
 
-  def gbp4d_xp_update_maxbnd(it, kt, max_bound) do
-    # projecting kt xp -> it along with direction w.r.t gbp4d_xp_it_pjt_kt.png
-    ik = gbp4d_xp_it_pjt_kt(it, kt)
-
-    # direction x-Y: kt-x-corner-move project-toward->Y
-    max_bound =
-      if ik[1] > 0 && it[2] + it[6] > max_bound[1] do
-        Matrex.set(max_bound, 1, 1, it[2] + it[6])
-      else
-        max_bound
-      end
-
-    # direction x-Z: kt-x-corner-move project-toward->Z
-    max_bound =
-      if ik[2] > 0 && it[3] + it[7] > max_bound[2] do
-        Matrex.set(max_bound, 2, 1, it[3] + it[7])
-      else
-        max_bound
-      end
-
-    # direction y-Z: kt-y-corner-move project-toward->Z
-    max_bound =
-      if ik[3] > 0 && it[3] + it[7] > max_bound[3] do
-        Matrex.set(max_bound, 3, 1, it[3] + it[7])
-      else
-        max_bound
-      end
-
-    # direction y-X: kt-y-corner-move project-toward-X
-    max_bound =
-      if ik[4] > 0 && it[1] + it[5] > max_bound[4] do
-        Matrex.set(max_bound, 4, 1, it[1] + it[5])
-      else
-        max_bound
-      end
-
-    # direction z-X: kt-z-corner-move project-toward->X
-    max_bound =
-      if ik[5] > 0 && it[1] + it[5] > max_bound[5] do
-        Matrex.set(max_bound, 5, 1, it[1] + it[5])
-      else
-        max_bound
-      end
-
-    # direction z-Y: kt-z-corner-move project-toward->Y
-    if ik[6] > 0 && it[2] + it[6] > max_bound[6] do
-      Matrex.set(max_bound, 6, 1, it[2] + it[6])
-    else
-      max_bound
-    end
+  @doc """
+  Can item `it` take the projection of the extreme points created by `kt`, on
+  the one direction (directions xY, xZ, yZ, yX, zX, zY).
+  """
+  @spec gbp4d_xp_it_pjt_kt(tuple, tuple) :: tuple
+  def gbp4d_xp_it_pjt_kt(
+        {itx, ity, itz, _, itl, itd, ith, _},
+        {ktx, kty, ktz, _, ktl, ktd, kth, _}
+      ) do
+    {
+      ity + itd <= kty and itx <= ktx + ktl and ktx + ktl < itx + itl and
+        itz <= ktz and ktz < itz + ith,
+      itz + ith <= ktz and itx <= ktx + ktl and ktx + ktl < itx + itl and
+        ity <= kty and kty < ity + itd,
+      itz + ith <= ktz and ity <= kty + ktd and kty + ktd < ity + itd and
+        itx <= ktx and ktx < itx + itl,
+      itx + itl <= ktx and ity <= kty + ktd and kty + ktd < ity + itd and
+        itz <= ktz and ktz < itz + ith,
+      itx + itl <= ktx and itz <= ktz + kth and ktz + kth < itz + ith and
+        ity <= kty and kty < ity + itd,
+      ity + itd <= kty and itz <= ktz + kth and ktz + kth < itz + ith and
+        itx <= ktx and ktx < itx + itl
+    }
   end
 
-  def gbp4d_xp_it_qjt_kt(it, kt) do
-    ik = []
-
-    # direction x-Y
-    ik =
-      ik ++
-        [
-          kt[2] + kt[6] <= it[2] && it[1] <= kt[1] + kt[5] && kt[1] + kt[5] < it[1] + it[5] &&
-            it[3] <= kt[3] && kt[3] < it[3] + it[7]
-        ]
-
-    # direction x-Z
-    ik =
-      ik ++
-        [
-          kt[3] + kt[7] <= it[3] && it[1] <= kt[1] + kt[5] && kt[1] + kt[5] < it[1] + it[5] &&
-            it[2] <= kt[2] && kt[2] < it[2] + it[6]
-        ]
-
-    # direction y-Z
-    ik =
-      ik ++
-        [
-          kt[3] + kt[7] <= it[3] && it[2] <= kt[2] + kt[6] && kt[2] + kt[6] < it[2] + it[6] &&
-            it[1] <= kt[1] && kt[1] < it[1] + it[5]
-        ]
-
-    # direction y-X
-    ik =
-      ik ++
-        [
-          kt[1] + kt[5] <= it[1] && it[2] <= kt[2] + kt[6] && kt[2] + kt[6] < it[2] + it[6] &&
-            it[3] <= kt[3] && kt[3] < it[3] + it[7]
-        ]
-
-    # direction z-X
-    ik =
-      ik ++
-        [
-          kt[1] + kt[5] <= it[1] && it[3] <= kt[3] + kt[7] && kt[3] + kt[7] < it[3] + it[7] &&
-            it[2] <= kt[2] && kt[2] < it[2] + it[6]
-        ]
-
-    # direction z-Y
-    ik =
-      ik ++
-        [
-          kt[2] + kt[6] <= it[2] && it[3] <= kt[3] + kt[7] && kt[3] + kt[7] < it[3] + it[7] &&
-            it[1] <= kt[1] && kt[1] < it[1] + it[5]
-        ]
-
-    ik =
-      Enum.map(ik, fn v ->
-        [Matrix.boolean_to_integer(v)]
-      end)
-
-    Matrex.new(ik)
+  @doc """
+  Drop later entries approximately equal (absdiff within tolerance) to an
+  earlier entry, keeping first occurrences - mirrors `unique_cols`.
+  """
+  @spec unique_cols([tuple]) :: [tuple]
+  def unique_cols(cols) do
+    Enum.reduce(cols, [], fn col, kept ->
+      if Enum.any?(kept, &approx_equal?(&1, col)) do
+        kept
+      else
+        [col | kept]
+      end
+    end)
+    |> Enum.reverse()
   end
 
-  def gbp4d_xp_it_pjt_kt(it, kt) do
-    ik = []
-
-    # direction x-Y
-    ik =
-      ik ++
-        [
-          it[2] + it[6] <= kt[2] && it[1] <= kt[1] + kt[5] && kt[1] + kt[5] < it[1] + it[5] &&
-            it[3] <= kt[3] && kt[3] < it[3] + it[7]
-        ]
-
-    # direction x-Z
-    ik =
-      ik ++
-        [
-          it[3] + it[7] <= kt[3] && it[1] <= kt[1] + kt[5] && kt[1] + kt[5] < it[1] + it[5] &&
-            it[2] <= kt[2] && kt[2] < it[2] + it[6]
-        ]
-
-    # direction y-Z
-    ik =
-      ik ++
-        [
-          it[3] + it[7] <= kt[3] && it[2] <= kt[2] + kt[6] && kt[2] + kt[6] < it[2] + it[6] &&
-            it[1] <= kt[1] && kt[1] < it[1] + it[5]
-        ]
-
-    # direction y-X
-    ik =
-      ik ++
-        [
-          it[1] + it[5] <= kt[1] && it[2] <= kt[2] + kt[6] && kt[2] + kt[6] < it[2] + it[6] &&
-            it[3] <= kt[3] && kt[3] < it[3] + it[7]
-        ]
-
-    # direction z-X
-    ik =
-      ik ++
-        [
-          it[1] + it[5] <= kt[1] && it[3] <= kt[3] + kt[7] && kt[3] + kt[7] < it[3] + it[7] &&
-            it[2] <= kt[2] && kt[2] < it[2] + it[6]
-        ]
-
-    # direction z-Y
-    ik =
-      ik ++
-        [
-          it[2] + it[6] <= kt[2] && it[3] <= kt[3] + kt[7] && kt[3] + kt[7] < it[3] + it[7] &&
-            it[1] <= kt[1] && kt[1] < it[1] + it[5]
-        ]
-
-    ik =
-      Enum.map(ik, fn v ->
-        [Matrix.boolean_to_integer(v)]
-      end)
-
-    Matrex.new(ik)
+  defp approx_equal?(a, b) when tuple_size(a) == tuple_size(b) do
+    Enum.all?(0..(tuple_size(a) - 1), fn i -> abs(elem(a, i) - elem(b, i)) <= @tol end)
   end
+
+  defp approx_equal?(_, _), do: false
 end

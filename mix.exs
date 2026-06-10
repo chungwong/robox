@@ -4,7 +4,7 @@ defmodule Robox.MixProject do
   def project do
     [
       app: :robox,
-      version: "0.1.0",
+      version: "0.2.0",
       elixir: "~> 1.6",
       package: package(),
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -43,8 +43,6 @@ defmodule Robox.MixProject do
 
   # Run "mix help deps" to learn about dependencies.
   defp deps do
-    [
-      {:matrex, "~> 0.6.0"}
-    ]
+    []
   end
 end
